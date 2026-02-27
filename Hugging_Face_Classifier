@@ -1,0 +1,106 @@
+# ===== ONE-CELL COMPLETE TAGGING PIPELINE =====
+
+# Install dependencies (safe to run even if already installed)
+!pip -q install transformers[sentencepiece] pandas torch
+
+import pandas as pd
+import torch
+from transformers import pipeline
+
+# ---------- CHECK GPU ----------
+use_gpu = torch.cuda.is_available()
+device = 0 if use_gpu else -1
+
+print("GPU available:", use_gpu)
+if use_gpu:
+    print("GPU:", torch.cuda.get_device_name(0))
+else:
+    print("Running on CPU")
+
+# ---------- LOAD MODEL (FAST VERSION) ----------
+classifier = pipeline(
+    "zero-shot-classification",
+    model="valhalla/distilbart-mnli-12-3",
+    device=device
+)
+
+# ---------- DEFINE LABELS ----------
+MAIN_LABELS = [
+    "Python", "SQL", "Excel", "Behavioural", "HR",
+    "Data Structures", "Algorithms", "Machine Learning",
+    "System Design", "Other"
+]
+
+DETAILED_LABELS = {
+    "Python": ["List", "Dictionary", "Tuple", "OOP", "Function", "Pandas", "Exception Handling"],
+    "SQL": ["SELECT", "JOIN", "GROUP BY", "Window Function", "Indexes", "Subquery"],
+    "Excel": ["Pivot Table", "VLOOKUP", "INDEX MATCH", "Charts", "Macros"],
+    "Behavioural": ["STAR", "Teamwork", "Leadership", "Conflict", "Strengths Weaknesses"],
+    "HR": ["Salary Expectation", "Notice Period", "Background", "Company Policy"],
+    "Data Structures": ["Array", "Linked List", "Stack", "Queue", "Tree", "Graph", "Hash Table"],
+    "Algorithms": ["Sorting", "Searching", "Dynamic Programming", "Greedy", "Recursion"],
+    "Machine Learning": ["Regression", "Classification", "Clustering", "Evaluation", "Neural Networks"],
+    "System Design": ["Scalability", "Load Balancing", "Database Design", "Caching", "Microservices"],
+    "Other": ["Misc"]
+}
+
+# ---------- LOAD YOUR CSV ----------
+# Upload your CSV to Colab first, then set path below
+CSV_PATH = "/content/questions.csv"   # <<< CHANGE if needed
+TEXT_COLUMN = "question"              # <<< CHANGE if your column name differs
+
+df = pd.read_csv(CSV_PATH)
+texts = df[TEXT_COLUMN].astype(str).tolist()
+
+print(f"Loaded {len(df)} rows")
+
+# ---------- STAGE 1: MAIN TAG (BATCHED) ----------
+main_results = classifier(
+    texts,
+    candidate_labels=MAIN_LABELS,
+    batch_size=64 if use_gpu else 8,
+    multi_label=False
+)
+
+tags = [r["labels"][0] for r in main_results]
+tag_scores = [float(r["scores"][0]) for r in main_results]
+
+df["Tag"] = tags
+df["Tag_confidence"] = tag_scores
+
+# ---------- STAGE 2: DETAILED TAG (GROUPED) ----------
+detailed_tags = [""] * len(df)
+detailed_scores = [0.0] * len(df)
+
+for main_label in set(tags):
+
+    indices = df[df["Tag"] == main_label].index.tolist()
+    if not indices:
+        continue
+
+    candidates = DETAILED_LABELS.get(main_label, ["Misc"])
+    group_texts = df.loc[indices, TEXT_COLUMN].astype(str).tolist()
+
+    results = classifier(
+        group_texts,
+        candidate_labels=candidates,
+        batch_size=64 if use_gpu else 8,
+        multi_label=False
+    )
+
+    for idx, res in zip(indices, results):
+        detailed_tags[idx] = res["labels"][0]
+        detailed_scores[idx] = float(res["scores"][0])
+
+df["Detailed Tag"] = detailed_tags
+df["Detailed_confidence"] = detailed_scores
+
+# ---------- SAVE OUTPUT ----------
+OUTPUT_PATH = "/content/tagged_questions.csv"
+df.to_csv(OUTPUT_PATH, index=False)
+
+print("✅ Tagging complete")
+print("Saved file:", OUTPUT_PATH)
+
+# Show sample
+df.head()
